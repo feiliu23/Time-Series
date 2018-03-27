@@ -1,0 +1,639 @@
+---
+title: "Canadian National Bankruptcy Rates Forecasting"
+author: "Anant Agarwal, Devin Bowers, Fei Liu, Cara Qin"
+date: "12/8/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library(tseries)
+library(car)
+library(MASS)
+library(forecast)
+library(vars)
+library(psych)
+library(xtable)
+```
+
+```{r}
+data <- read.csv("/Users/xiaohui/Documents/0_2017_USF/MSAN_604_TS/Final project/train.csv", header = TRUE,sep = ",") # 1987 - 2010
+data <- data[which(is.na(data['Month']) == 0),] #remove blank lines at bottom
+test <- read.csv("/Users/xiaohui/Documents/0_2017_USF/MSAN_604_TS/Final project/test.csv") # 2011, 2012
+```
+
+### Split data to training(1987-2008) and validation(2009 and 2010)
+```{r}
+n = nrow(data)
+train <- data[1:(n-24),] # 1987-2008
+valid <- data[(n-23):n,] # 2009-2010
+```
+
+### Display summary statistics, correlation, and plot
+```{r}
+summary(data)
+```
+
+```{r, fig.width=10, fig.height=4 }
+par(mfrow=c(2,2))
+plot( ts(data$Bankruptcy_Rate, start = c(1987,1), frequency = 12), main = "plot of bankruptcy_rate", ylab = "bankruptcy_rate", xlab = "time")
+abline(v=2008,col='blue',lty=2)
+plot( ts(data$House_Price_Index, start = c(1987,1), frequency = 12), main = "plot of House_Price_Index", ylab = "House_Price_Index", xlab = "time")
+abline(v=2008,col='blue',lty=2)
+plot( ts(data$Population, start = c(1987,1), frequency = 12), main = "plot of Population", ylab = "Population", xlab = "time")
+abline(v=2008,col='blue',lty=2)
+plot( ts(data$Unemployment_Rate, start = c(1987,1), frequency = 12), main = "plot of Unemployment_Rate", ylab = "Unemployment_Rate", xlab = "time")
+abline(v=2008,col='blue',lty=2)
+```
+
+```{r}
+pairs.panels(data[,-1], 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+            #density = TRUE,  # show density plots
+             ellipses = FALSE # show correlation ellipses
+             )
+```
+
+
+### Data Exploration and transformation: take log; take one ordinary differencing and one seasonal differencing
+```{r, fig.width=10, fig.height=6 }
+y <- ts(train$Bankruptcy_Rate, start = c(1987,1), frequency = 12)
+par(mfrow=c(2,1))
+plot(y, main = "plot of bankruptcy_rate", ylab = "bankruptcy_rate", xlab = "time")
+acf(y, lag.max = 144) 
+#take log of y for having constant variance
+newy <- log(y) 
+plot(newy, main="after boxcox")
+acf(newy, lag.max = 144) 
+```
+
+```{r, fig.width=10, fig.height=6 }
+par(mfrow=c(2,1))
+#take one ordinary differencing to remove trend
+AP1 <- diff(newy)
+plot(AP1, ylab = "AP1",xlab = "Month", main="After one ordinary differencing")
+adf.test(AP1)
+par(mfrow=c(2,1))
+acf(AP1, lag.max = 144) 
+pacf(AP1, lag.max = 144)
+```
+
+```{r, fig.width=10, fig.height=6}
+#Take one seasonal differencing. 
+nsdiffs(AP1)
+AP1.12 <- diff(AP1, lag=12)
+plot(AP1.12, ylab = "AP1.12",xlab = "Month", main="after 1 ordinary and 1 seasonal differencing with s=12")
+adf.test(AP1.12) 
+par(mfrow=c(2,1))
+acf(AP1.12, lag.max = 144) 
+pacf(AP1.12, lag.max = 144)
+```
+
+### Look at ACF and PACF plot to try p, q, P, Q which p<=3, q ~ exponential decay or q <=3, P <=3, Q ~ exponential decay or Q<=3.
+
+### Modeling Approach 1: Univariate SARIMA on Backruptcy (log) exhaustive search 
+```{r}
+y.train <- newy#define response variable in training 
+y.test <- valid$Bankruptcy_Rate#define response variable in validation
+```
+
+```{r, fig.width=6, fig.height=3, eval=FALSE }
+maxp <- 3
+perm <- expand.grid(p = seq(0,maxp), q = seq(0,maxp), P = seq(0,maxp), Q = seq(0,maxp))
+perm['df'] <- perm[1]+perm[2]+perm[3]+perm[4]
+perm.sort <- perm[order(perm['df']),]
+
+train.rmse <- rep(0,nrow(perm.sort))
+test.rmse <- rep(0,nrow(perm.sort))
+train.aic <- rep(0,nrow(perm.sort))
+train.sigma<-rep(0,nrow(perm.sort))
+train.loglik <- rep(0,nrow(perm.sort))
+
+for (i in 1:nrow(perm.sort)){
+
+  model <- tryCatch(arima(y.train, order = c(perm.sort[i,'p'], 1, perm.sort[i,'q']), seasonal = list(order =   c(perm.sort[i,'P'], 1, perm.sort[i,'Q']), period = 12), method = "CSS-ML") , error=function(e) print("NC"))
+  
+  #if MLE is converged, append results, otherwise set results to NA.
+  if ( (model[1] == "NC") == FALSE){ 
+  #training rmse
+  fitted <- y.train - model$residuals
+  tr.rmse <- sqrt(mean((exp(fitted) - exp(y.train))^2))
+
+  #test rmse
+  yhat <- forecast(object = model, h=24, level = 0.95)
+  te.rmse <- sqrt(mean((exp(yhat$mean) - y.test)^2)) 
+  
+  #Save training rmse, aic, sigma, loglik; test rmse
+  train.rmse[i] <- tr.rmse
+  test.rmse[i] <-te.rmse
+  train.aic[i] <- model$aic
+  train.sigma[i] <- model$sigma2
+  train.loglik[i] <- model$loglik} else{
+    
+  print (paste0("MLE in model ", i, "is not converged", sep=" "))  
+  train.rmse[i] <- NA
+  test.rmse[i] <- NA
+  train.aic[i] <- NA
+  train.sigma[i] <- NA
+  train.loglik[i] <- NA}
+ }
+
+models.result <- data.frame(perm.sort, train.aic, train.sigma, train.loglik, train.rmse, test.rmse) 
+
+#plot test.rmse & train aic in the same plot
+par(mfrow=c(2,2))
+plot(models.result$train.aic, type="l", main="aic")
+plot(models.result$train.sigma, type="l", main="sigma")
+#plot(models.result$train.loglik, type="l", main="loglk")
+plot(models.result$test.rmse, type="l", main="test rmse")
+plot(models.result$train.rmse, type="l", main="train rmse")
+
+setwd('/Users/xiaohui/Documents/0_2017_USF/MSAN_604_TS/Final project')
+write.csv(models.result, file = "models.result_p3.csv")
+
+```
+
+### Loglikelihood ratio test to compare models
+```{r}
+#Function to perform log-likelihood ratio test
+myLRT <- function(m1, m2){
+  D <- -2*(m1$loglik - m2$loglik)
+  pval <- 1-pchisq(D,length(m2$coef) - length(m1$coef))
+  print(c("Test Statistic:",round(D, 4),"P-value:", round(pval, 4)))
+}
+```
+
+```{r}
+#Conduct likelihood ratio test
+#Compare models with TEST RMSE <0.004 AND training AIC<-650
+#models.result <- read.csv("models.result_p3.csv")
+#lrt.modesl <- models.result[which(models.result$train.aic < -650 & models.result$test.rmse < 0.004), ] #15 models to compare
+
+#list of comparable models
+m.df6 <- arima(y.train, order = c(0,1,1), seasonal = list(order = c(3,1,2), period = 12), method = "CSS-ML")
+m.df7 <- arima(y.train, order = c(0,1,1), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML") 
+m.df8 <- arima(y.train, order = c(0,1,2), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")
+m.df9 <- arima(y.train, order = c(1,1,2), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")
+m.df10 <- arima(y.train, order = c(1,1,3), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")
+m.df11 <- arima(y.train, order = c(3,1,3), seasonal = list(order = c(2,1,3), period = 12), method = "CSS-ML")#
+m.df12 <- arima(y.train, order = c(3,1,3), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")
+m.df82 <- arima(y.train, order = c(0,1,3), seasonal = list(order = c(2,1,3), period = 12), method = "CSS-ML")
+m.df72 <- arima(y.train, order = c(0,1,2), seasonal = list(order = c(2,1,3), period = 12), method = "CSS-ML")
+```
+
+```{r}
+myLRT(m.df12, m.df11)
+myLRT(m.df82, m.df11) 
+myLRT(m.df72, m.df82) 
+myLRT(m.df9, m.df10) 
+myLRT(m.df9, m.df11)
+myLRT(m.df8, m.df9)
+myLRT(m.df7, m.df8)
+myLRT(m.df6, m.df7) 
+myLRT(m.df7, m.df9)
+```
+
+### Optimal model for Univariate Sarima
+```{r}
+#optimal.sarima <- arima(y.train, order = c(1,1,2), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")#can't pass levens
+#optimal.sarima <- arima(y.train, order = c(0,1,3), seasonal = list(order = c(2,1,3), period = 12), method = "CSS-ML")
+optimal.sarima <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")##pass all assumption tests
+#optimal.sarima <- arima(y.train, order = c(1,1,1), seasonal = list(order = c(2,1,2), period = 12), method = "CSS-ML")
+
+yhat <- forecast(object = optimal.sarima, h=24, level = 0.95) #predicted test
+te.rmse <- sqrt(mean((exp(yhat$mean) - y.test)^2)) #test rmse
+te.rmse
+optimal.sarima$loglik
+optimal.sarima$aic
+```
+
+
+### SARIMA Model residual diagnostic
+```{r}
+e <- optimal.sarima$residuals
+####(1) test whether residuals have zero mean
+t.test(e)
+####(2) test heteroscedasticity
+plot(e, main = "Residuals vs. Time", ylab = "Residuals", xlab = "Time", type='p') # plotting the residuals vs time
+abline(h = 0, col = "red", lwd = 2) # plotting a horizontal line at 0
+group <- cut(1:length(e), breaks=4, labels=(1:4))
+leveneTest(e,group) #Levene
+bartlett.test(e,group) #Bartlett 
+####(3) test uncorrelatedness 
+Box.test(e, type='Ljung-Box', lag = 6)
+Box.test(e, type='Ljung-Box', lag = 7)
+tsdiag(optimal.sarima) 
+####(4) test normality
+par(mfrow=c(1,1))
+qqnorm(e, main="QQ-plot of Residuals")
+qqline(e, col = "red")
+shapiro.test(e) 
+
+```
+
+### Modeling Approch 2: SARIMAX MODEL
+```{r}
+# 1. Add HPI
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   train$House_Price_Index   , method = "CSS-ML")
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid$House_Price_Index)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+# 2. Add Unemployment rate
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   train$Unemployment_Rate   , method = "CSS-ML")
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid$Unemployment_Rate)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+# 3. Add Population
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   train$Population   , method = "CSS-ML")
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid$Population)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+# 4 HPI & Unemployment rate
+train.ex <- subset(train, select = -c(Month, Bankruptcy_Rate, Population))
+valid.ex <- subset(valid, select = -c(Month, Bankruptcy_Rate, Population))
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg= train.ex, method = "CSS-ML") 
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid.ex)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+# 5 HPI & Population
+train.ex <- subset(train, select = -c(Month, Bankruptcy_Rate, Unemployment_Rate))
+valid.ex <- subset(valid, select = -c(Month, Bankruptcy_Rate, Unemployment_Rate))
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg= train.ex, method = "CSS-ML") 
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid.ex)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+#6. Population & Unemployment rate
+train.ex <- subset(train, select = -c(Month, Bankruptcy_Rate, House_Price_Index))
+valid.ex <- subset(valid, select = -c(Month, Bankruptcy_Rate, House_Price_Index))
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg= train.ex, method = "CSS-ML") 
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid.ex)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+```
+
+```{r}
+#7. Add all three
+train.ex <- subset(train, select = -c(Month, Bankruptcy_Rate))
+valid.ex <- subset(valid, select = -c(Month, Bankruptcy_Rate))
+m.sax1  <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg= train.ex, method = "CSS-ML") 
+f.sax1 <- predict(m.sax1, n.ahead = 24, newxreg = valid.ex)#adding external
+rmse.sax1 <- sqrt(mean((exp(f.sax1$pred) - y.test)^2))
+rmse.sax1
+m.sax1$aic
+m.sax1$loglik
+
+```
+
+### Choose optimal sarimaX
+```{r}
+optimal.sax <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   train$Unemployment_Rate   , method = "CSS-ML")
+```
+
+### Likelihood ratio test: SARIMA VS.SARIMAX
+```{r}
+myLRT(optimal.sarima, optimal.sax)
+```
+### SARIMAX Model diagnostic
+```{r}
+e <- optimal.sax$residuals
+####(1) test whether residuals have zero mean
+t.test(e)
+####(2) test heteroscedasticity
+plot(e, main = "Residuals vs. Time", ylab = "Residuals", xlab = "Time", type='p') # plotting the residuals vs time
+abline(h = 0, col = "red", lwd = 2) # plotting a horizontal line at 0
+group <- cut(1:length(e), breaks=4, labels=(1:4))
+leveneTest(e,group) #Levene
+bartlett.test(e,group) #Bartlett 
+####(3) test uncorrelatedness 
+Box.test(e, type='Ljung-Box', lag = 6)
+Box.test(e, type='Ljung-Box', lag = 7)
+tsdiag(optimal.sax)
+####(4) test normality
+par(mfrow=c(1,1))
+qqnorm(e, main="QQ-plot of Residuals")
+qqline(e, col = "red")
+shapiro.test(e) 
+```
+
+
+### Modeling Approch 3: Vector autoregression
+```{r}
+#Month indicator
+train.sea <- train
+train.sea['month'] = seq(1,12)
+test.seas<- valid
+test.seas['month'] = seq(1,12)
+
+train.seas.month <- data.frame(feb = (train.sea$month==2)*1, mar = (train.sea$month==3)*1, apr = (train.sea$month==4)*1, may = (train.sea$month==5)*1, jun = (train.sea$month==6)*1, jul = (train.sea$month==7)*1, aug = (train.sea$month==8)*1, sep = (train.sea$month==9)*1, nov = (train.sea$month==11)*1, dec = (train.sea$month==12)*1)
+
+test.seas.month <- data.frame(feb = (test.seas$month==2)*1, mar = (test.seas$month==3)*1, apr = (test.seas$month==4)*1, may = (test.seas$month==5)*1, jun = (test.seas$month==6)*1, jul = (test.seas$month==7)*1, aug = (test.seas$month==8)*1, sep = (test.seas$month==9)*1, nov = (test.seas$month==11)*1, dec = (test.seas$month==12)*1)
+```
+
+```{r}
+# (1) Include all 3 variables as endogenous vars
+vardf <-  data.frame(y.train, subset(train, select = -c(Month, Bankruptcy_Rate)))
+my.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+#summary(my.var)
+test.pred <-predict(my.var, n.ahead=24, ci=0.95)
+predict.y <- test.pred$fcst$y.train
+rmse.var <- sqrt(mean( (exp(predict.y[,1]) - y.test)^2)) 
+rmse.var
+```
+
+```{r}
+# (2) Include housing index only
+vardf <-  data.frame(y.train, train$House_Price_Index)
+my.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+#summary(my.var)
+test.pred <-predict(my.var, n.ahead=24, ci=0.95) 
+predict.y <- test.pred$fcst$y.train
+rmse.var <- sqrt(mean( (exp(predict.y[,1]) - y.test)^2)) 
+rmse.var
+```
+
+```{r}
+# (3) Include Unemployment_Rate only
+vardf <-  data.frame(y.train, train$Unemployment_Rate)
+my.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+#summary(my.var)
+test.pred <-predict(my.var, n.ahead=24, ci=0.95) 
+predict.y <- test.pred$fcst$y.train
+rmse.var <- sqrt(mean( (exp(predict.y[,1]) - y.test)^2)) 
+rmse.var
+```
+
+```{r}
+# (3) Include Population only
+vardf <-  data.frame(y.train, train$Population)
+my.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+#summary(my.var)
+test.pred <-predict(my.var, n.ahead=24, ci=0.95) 
+predict.y <- test.pred$fcst$y.train
+rmse.var <- sqrt(mean( (exp(predict.y[,1]) - y.test)^2)) 
+rmse.var
+```
+
+### With season
+```{r}
+# (3) Include seasonal indicators
+vardf <-  data.frame(y.train, subset(train, select = -c(Month, Bankruptcy_Rate)))
+my.var<- VAR(y = vardf, ic = 'AIC', lag.max=2,  exogen=train.seas.month)
+test.pred <-predict(my.var, n.ahead=24, ci=0.95, dumvar= test.seas.month)
+predict.y <- test.pred$fcst$y.train
+rmse.var <- sqrt(mean( (exp(predict.y[,1]) - y.test)^2)) 
+rmse.var
+```
+
+### Choose optiomal VAR(p) model
+```{r}
+vardf <-  data.frame(y.train, subset(train, select = -c(Month, Bankruptcy_Rate)))
+optimal.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+optimal.var$varresult
+```
+
+```{r}
+#Model diagnostic
+une <- optimal.var$varresult$Unemployment_Rate
+pop <- optimal.var$varresult$Population
+br <- optimal.var$varresult$y.train
+hi <- optimal.var$varresult$House_Price_Index
+
+e.une <- une$residuals
+e.pop <- pop$residuals
+e.br <- br$residuals
+e.hi <- hi$residuals
+
+# Residual Diagnostics:
+# test whether residuals have zero mean pass
+t.test(e.br)
+plot(e.br, main = "Residuals vs. Time", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+# test for heteroscedasticity  
+par(mfrow=c(1,1))
+plot(e.br, main="Residuals vs t", ylab="")
+abline(v=c(1992,1997,2003), lwd=3, col="red")
+#group <- c(rep(1,52),rep(2,52),rep(3,52),rep(4,53),rep(5,54))
+group <- cut(1:length(e.br), breaks=4, labels=(1:4))
+leveneTest(e.br,group) #Levene
+bartlett.test(e.br, group) #Bartlett
+
+# test for uncorrelatedness 
+acf(ts(e.br))
+pacf(ts(e.br))
+# test for normality pass
+par(mfrow=c(1,1))
+qqnorm(e.br)
+qqline(e.br, col = "red")
+shapiro.test(e.br)
+```
+test for uncorrelatedness doesn't pass.
+
+### Modeling Approch 4: Holt-Winters
+```{r}
+#Create grid
+alpha <- seq(0.1,0.9,by=0.02)
+beta <- seq(0.1,0.9,by=0.02)
+gamma <- seq(0.1,0.9,by=0.1)
+OrderGrid <- expand.grid(alpha,beta,gamma)
+
+##Additive Holt-Winters approach
+for (i in 1:nrow(OrderGrid)){
+tryCatch(assign(paste('m_hw_add_',i,sep=''),HoltWinters(x = y.train, seasonal = 'add', alpha = OrderGrid[i,][[1]], beta = OrderGrid[i,][[2]], gamma = OrderGrid[i,][[3]])), error = function(e) print(i))
+}
+
+rmse_hw_add <- c()
+for (i in nrow(OrderGrid)) {
+  pred_hw_add <- forecast(eval(parse(text=paste('m_hw_add_',i,sep=''))), h = 24, prediction.interval = T, level = 0.95)
+  rmse_hw_add <- c(rmse_hw_add, sqrt(mean((y.test - exp(pred_hw_add$mean))^2)))
+}
+
+d_add <- data.frame(alpha = OrderGrid[,1], beta = OrderGrid[,2], gamma = OrderGrid[,3], rmse_hw_add)
+d_add[order(d_add$rmse_hw_add),]
+
+##Multiplicative Holt-Winters approach
+for (i in 1:nrow(OrderGrid)){
+tryCatch(assign(paste('m_hw_mult_',i,sep=''),HoltWinters(x = y.train, seasonal = 'mult', alpha = OrderGrid[i,][[1]], beta = OrderGrid[i,][[2]], gamma = OrderGrid[i,][[3]])), error = function(e) print(i))
+}
+
+rmse_hw_mult <- c()
+for (i in 1:nrow(OrderGrid)) {
+  pred_hw_mult <- forecast(eval(parse(text=paste('m_hw_mult_',i,sep=''))), h = 24, prediction.interval = T, level = 0.95)
+  rmse_hw_mult <- c(rmse_hw_mult, sqrt(mean((y.test - exp(pred_hw_mult$mean))^2)))
+}
+
+d <- data.frame(alpha = OrderGrid[,1], beta = OrderGrid[,2], gamma = OrderGrid[,3], rmse_hw_mult)
+d[order(d$rmse_hw_mult),]
+```
+
+
+### Choose the optimal Holt-Winters model
+```{r}
+##Multiplicative Holt-Winters approach
+optimal.hw <- HoltWinters(x = y.train, alpha = 0.62, beta = 0.86, gamma = 0.8, seasonal = 'mult')
+pred_holt_winters <- forecast(optimal.hw, h = 24, prediction.interval = T, level = 0.95)
+
+#Taking exponential of predictions
+pred_holt_winters$x     <- exp(pred_holt_winters$x)
+pred_holt_winters$mean  <- exp(pred_holt_winters$mean)
+pred_holt_winters$upper <- exp(pred_holt_winters$upper)
+pred_holt_winters$lower <- exp(pred_holt_winters$lower)
+
+rmse <- sqrt(mean((y.test - pred_holt_winters$mean)^2))
+rmse
+```
+
+
+### Choose the final optimal model to forecast bankruptcy in test data
+
+```{r}
+# Use all data to train selected SARIMAX model
+optimal.final <- arima(log(data$Bankruptcy_Rate), order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   data$Unemployment_Rate, method = "CSS-ML")
+```
+
+### Final Model diagnostic
+```{r,  fig.width=4, fig.height=2}
+par(mfrow=c(1,2))
+
+e <- optimal.final$residuals
+####(1) test whether residuals have zero mean
+t.test(e)
+####(2) test heteroscedasticity
+plot(e, main = "Residuals vs. Time", ylab = "Residuals", xlab = "Time", type='p') # plotting the residuals vs time
+abline(h = 0, col = "red", lwd = 2) # plotting a horizontal line at 0
+group <- cut(1:length(e), breaks=3, labels=(1:3))
+leveneTest(e,group) #Levene
+bartlett.test(e,group) #Bartlett 
+
+####(4) test normality
+
+qqnorm(e, main="QQ-plot of Residuals")
+qqline(e, col = "red")
+shapiro.test(e) 
+
+
+####(3) test uncorrelatedness 
+Box.test(e, type='Ljung-Box', lag = 6)
+Box.test(e, type='Ljung-Box', lag = 7)
+tsdiag(optimal.final)
+```
+
+### Forecasting test data
+```{r}
+fitted.y <- exp(fitted(optimal.final)) #fitted value
+fitted.y.ts <- ts(fitted.y, start = c(1987,1), frequency = 12)
+fit.l.ts <- window(fitted.y.ts, end=c(2010,12))
+
+f.sax1 <- forecast(object = optimal.final, h=24, level = 0.95, xreg = test$Unemployment_Rate) #forecasting
+pred.ts  <-  ts(exp(f.sax1$mean), start = c(2011,1), frequency = 12)
+low95.ts <- ts(exp(f.sax1$lower), start = c(2011,1), frequency = 12)
+upper95.ts <-ts(exp(f.sax1$upper),  start = c(2011,1), frequency = 12)
+
+# Generate forecast results in graph
+par(mfrow  =  c(1,  1))
+data <- read.csv("/Users/xiaohui/Documents/0_2017_USF/MSAN_604_TS/Final project/train.csv", header = TRUE,sep = ",") # 1987 - 2010
+plot(ts(data$Bankruptcy_Rate, start = c(1987,1), frequency = 12), type='l', main = "Forecast of Bankruptcy Rate", xlab="Year", ylab = "Bankruptcy Rate")
+abline(v = 2011,  lwd  =  0.5,  col  =  "black")
+
+
+lines(fit.l.ts ,col='green', type='l')
+lines(pred.ts  ,col='red', type='l')
+lines(low95.ts ,col='blue', type='l')
+lines(upper95.ts ,col='blue', type='l')
+
+legend("topleft",lty=c(1,1),cex=0.8,
+       col=c("black","red",'green','blue'),
+       legend=c('Observed','Predicted','Fitted','95%PI'))
+```
+
+```{r}
+# Generate forecasting results in table(Appendix 6.2)
+month <- gsub('.{3}$', '', seq(as.Date("2011/1/1"), by="month", length=24))
+prediction.final <- data.frame(month, c(pred.ts),c(low95.ts),c(upper95.ts))
+colnames(prediction.final) <- c("Month","Prediction","Lower Bound(95%)", "Upper Bound(95%)")
+#knitr::kable(prediction.final, digits = 4, align = "r")
+tli.table <- xtable(prediction.final, digits = 4, auto = FALSE)
+print(tli.table, type = "latex",  include.rownames = FALSE)
+```
+
+```{r}
+# Generate prediction(a single column .txt file without header) (submission)
+write.table(prediction.final$Prediction, "Team1.4.txt", sep="\t", col.names = FALSE, row.names = FALSE)
+```
+
+
+
+# Try ensemble 4 optimal models for each approach
+```{r}
+#SARIMA
+optimal.sarima <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), method = "CSS-ML")
+y1 <- forecast(object = optimal.sarima, h=24, level = 0.95) #predicted test
+y1.rmse <- sqrt(mean((exp(y1$mean) - y.test)^2)) #test rmse
+y1.rmse
+
+##SARIMAX
+optimal.sax <- arima(y.train, order = c(2,1,0), seasonal = list(order = c(3,1,3), period = 12), xreg=   train$Unemployment_Rate   , method = "CSS-ML")
+y2 <- predict(optimal.sax, n.ahead = 24, newxreg = valid$Unemployment_Rate)#adding external
+y2.rmse <- sqrt(mean((exp(y2$pred) - y.test)^2))
+y2.rmse
+
+##VAR
+vardf <-  data.frame(y.train, subset(train, select = -c(Month, Bankruptcy_Rate)))
+optimal.var<- VAR(y = vardf, ic = 'AIC', lag.max=3)
+test.pred <-predict(optimal.var, n.ahead=24, ci=0.95)
+y3 <- test.pred$fcst$y.train
+y3.rmse <- sqrt(mean( (exp(y3[,1]) - y.test)^2)) 
+y3.rmse
+
+##Holt Winter
+optimal.hw <- HoltWinters(x = y.train, alpha = 0.62, beta = 0.86, gamma = 0.8, seasonal = 'mult')
+y4 <- forecast(optimal.hw, h = 24, prediction.interval = T, level = 0.95)
+y4.rmse <- sqrt(mean((y.test - exp(y4$mean))^2))
+y4.rmse
+# ensemble
+ensemble <- (exp(y1$mean) + exp(y4$mean) + exp(y2$pred) + exp(y3[,1]))/4
+sqrt(mean((ensemble- y.test)^2))
+```
+
+```{r}
+#generate compiled RMSE table in model selection: Figure 3.1
+
+RMSE.table <- data.frame(c("SARIMA(2,1,0)(3,1,3)[12]","SARIMAX(2,1,0)(3,1,3)[12] Unemployment Rate", "VAR(3)", "Holt-Winters"),c(y1.rmse, y2.rmse, y3.rmse, y4.rmse))
+colnames(RMSE.table) <- c("Model","RMSE")
+#knitr::kable(RMSE.table, digits = 4, align = "r")
+tli.table <- xtable(RMSE.table, digits = 4, auto = FALSE)
+print(tli.table, type = "latex",  include.rownames = FALSE)
+```
+```
+
